@@ -57,6 +57,12 @@ class OcompState(Enum):
     OFF = "OFF"
 
 
+class Terminal(Enum):
+    """Input terminal selection."""
+    FRONT = "FRONT"
+    REAR = "REAR"
+
+
 # ======================================================================
 # Range / NPLC definitions
 # ======================================================================
@@ -285,6 +291,16 @@ class R6581T:
         self._inst.write(f":SENS:FRES:OCOM {ocomp.value}")
         self._inst.write(":SENS:FRES:SOUR:STAT ON")
         self._inst.write(":FORM:ELEM NONE")
+
+    # ------------------------------------------------------------------
+    # Terminal switching
+    # ------------------------------------------------------------------
+
+    def set_terminal(self, terminal: Terminal) -> None:
+        """Switch between FRONT and REAR input terminals."""
+        if not self._connected:
+            raise RuntimeError("Not connected to instrument")
+        self._inst.write(f":INP:TERM {terminal.value}")
 
     # ------------------------------------------------------------------
     # Reading
