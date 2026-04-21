@@ -15,7 +15,7 @@ from typing import Optional
 from instrument.r6581t import (
     R6581T, MeasureMode, RANGES, NPLC_VALUES, UNITS,
     Guard, ResistancePower, OcompState, Terminal,
-    ReadResult,
+    ReadResult, RTDConfig, RTDType, RTDScale, RTDUnit,
 )
 from data.csv_writer import CSVWriter
 from gui.worker import MeasurementWorker, TerminalReadResult, TerminalConfig
@@ -47,6 +47,16 @@ class TerminalPanel:
         self.power_var = tk.StringVar(value="High")
         self.ocomp_var = tk.StringVar(value="OFF")
         self._on_apply = on_apply
+
+        # RTD state variables
+        self.rtd_enabled_var  = tk.BooleanVar(value=False)
+        self.rtd_type_var     = tk.StringVar(value=RTDType.PT100.value)
+        self.rtd_scale_var    = tk.StringVar(value=RTDScale.ITS90.value)
+        self.rtd_unit_var     = tk.StringVar(value=RTDUnit.C.value)
+        self.rtd_alpha_var    = tk.StringVar(value="0.003750")
+        self.rtd_beta_var     = tk.StringVar(value="0.160000")
+        self.rtd_delta_var    = tk.StringVar(value="1.605000")
+        self.rtd_r0_var       = tk.StringVar(value="1000.0")
 
         # --- Main frame ---
         self.frame = ttk.LabelFrame(parent, text=label, padding=6)
@@ -132,6 +142,95 @@ class TerminalPanel:
         self.ocomp_combo.grid(row=row, column=1, sticky=tk.EW, padx=4, pady=1)
         row += 1
 
+        # --- RTD Temperature section (inside 4W area) ---
+        self._rtd_sep = ttk.Label(self.config_frame, text="RTD Temperature", style="Section.TLabel")
+        self._rtd_sep.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(6, 1))
+        row += 1
+
+        self._rtd_check = ttk.Checkbutton(
+            self.config_frame, text="Enable RTD conversion",
+            variable=self.rtd_enabled_var,
+            command=self._on_rtd_toggled,
+        )
+        self._rtd_check.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=1)
+        row += 1
+
+        # RTD sub-controls — shown/hidden by _on_rtd_toggled
+        self._rtd_type_label = ttk.Label(self.config_frame, text="Probe type:")
+        self._rtd_type_label.grid(row=row, column=0, sticky=tk.W, pady=1)
+        self._rtd_type_combo = ttk.Combobox(
+            self.config_frame, textvariable=self.rtd_type_var, width=14,
+            values=[t.value for t in RTDType], state="readonly",
+        )
+        self._rtd_type_combo.grid(row=row, column=1, sticky=tk.EW, padx=4, pady=1)
+        self._rtd_type_combo.bind("<<ComboboxSelected>>", lambda e: self._on_rtd_type_changed())
+        row += 1
+
+        self._rtd_scale_label = ttk.Label(self.config_frame, text="Scale:")
+        self._rtd_scale_label.grid(row=row, column=0, sticky=tk.W, pady=1)
+        self._rtd_scale_combo = ttk.Combobox(
+            self.config_frame, textvariable=self.rtd_scale_var, width=14,
+            values=[s.value for s in RTDScale], state="readonly",
+        )
+        self._rtd_scale_combo.grid(row=row, column=1, sticky=tk.EW, padx=4, pady=1)
+        row += 1
+
+        self._rtd_unit_label = ttk.Label(self.config_frame, text="Unit:")
+        self._rtd_unit_label.grid(row=row, column=0, sticky=tk.W, pady=1)
+        self._rtd_unit_combo = ttk.Combobox(
+            self.config_frame, textvariable=self.rtd_unit_var, width=14,
+            values=[u.value for u in RTDUnit], state="readonly",
+        )
+        self._rtd_unit_combo.grid(row=row, column=1, sticky=tk.EW, padx=4, pady=1)
+        row += 1
+
+        # USER coefficient fields
+        self._rtd_coeff_sep = ttk.Label(
+            self.config_frame, text="User coefficients", style="Section.TLabel",
+        )
+        self._rtd_coeff_sep.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(4, 1))
+        row += 1
+
+        def _make_coeff_row(label_text, var, tooltip):
+            nonlocal row
+            lbl = ttk.Label(self.config_frame, text=label_text)
+            lbl.grid(row=row, column=0, sticky=tk.W, pady=1)
+            ent = ttk.Entry(self.config_frame, textvariable=var, width=14)
+            ent.grid(row=row, column=1, sticky=tk.EW, padx=4, pady=1)
+            row += 1
+            return lbl, ent
+
+        self._rtd_alpha_label, self._rtd_alpha_entry = _make_coeff_row(
+            "α (alpha):", self.rtd_alpha_var,
+            "Temperature coefficient [Ω/Ω/°C]. IEC 60751: 0.003850",
+        )
+        self._rtd_beta_label, self._rtd_beta_entry = _make_coeff_row(
+            "β (beta):", self.rtd_beta_var,
+            "Callendar-Van Dusen β",
+        )
+        self._rtd_delta_label, self._rtd_delta_entry = _make_coeff_row(
+            "δ (delta):", self.rtd_delta_var,
+            "Callendar-Van Dusen δ",
+        )
+        self._rtd_r0_label, self._rtd_r0_entry = _make_coeff_row(
+            "R₀ (Ω):", self.rtd_r0_var,
+            "Nominal resistance at 0°C in Ohms (100 for Pt100, 1000 for Pt1000)",
+        )
+
+        # Collect all RTD sub-widgets for bulk show/hide
+        self._rtd_sub_widgets = [
+            self._rtd_type_label, self._rtd_type_combo,
+            self._rtd_scale_label, self._rtd_scale_combo,
+            self._rtd_unit_label, self._rtd_unit_combo,
+        ]
+        self._rtd_user_widgets = [
+            self._rtd_coeff_sep,
+            self._rtd_alpha_label, self._rtd_alpha_entry,
+            self._rtd_beta_label, self._rtd_beta_entry,
+            self._rtd_delta_label, self._rtd_delta_entry,
+            self._rtd_r0_label, self._rtd_r0_entry,
+        ]
+
         # Apply button
         self.apply_btn = ttk.Button(
             self.config_frame, text="Apply",
@@ -167,6 +266,35 @@ class TerminalPanel:
                   self._ocomp_label, self.ocomp_combo):
             w.grid() if is_res4w else w.grid_remove()
 
+        # RTD section is only available in RES4W
+        for w in (self._rtd_sep, self._rtd_check):
+            w.grid() if is_res4w else w.grid_remove()
+
+        if not is_res4w:
+            # Hide all RTD sub-controls too when leaving RES4W
+            for w in self._rtd_sub_widgets + self._rtd_user_widgets:
+                w.grid_remove()
+        else:
+            # Re-apply RTD toggle state
+            self._on_rtd_toggled()
+
+    def _on_rtd_toggled(self) -> None:
+        """Show or hide RTD sub-controls based on the enable checkbox."""
+        enabled = self.rtd_enabled_var.get()
+        for w in self._rtd_sub_widgets:
+            w.grid() if enabled else w.grid_remove()
+        if enabled:
+            self._on_rtd_type_changed()
+        else:
+            for w in self._rtd_user_widgets:
+                w.grid_remove()
+
+    def _on_rtd_type_changed(self) -> None:
+        """Show or hide USER coefficient fields based on probe type selection."""
+        is_user = self.rtd_type_var.get() == RTDType.USER.value
+        for w in self._rtd_user_widgets:
+            w.grid() if is_user else w.grid_remove()
+
     def update_appearance(self) -> None:
         """Update display and config visibility based on enabled state."""
         if self.enabled_var.get():
@@ -189,14 +317,37 @@ class TerminalPanel:
         """Build a TerminalConfig from the current widget values."""
         guard_name = self.guard_var.get().upper()
         power_name = self.power_var.get().upper()
+        mode = MeasureMode[self.mode_var.get()]
+
+        rtd_cfg = None
+        if mode == MeasureMode.RES4W and self.rtd_enabled_var.get():
+            rtd_type = RTDType(self.rtd_type_var.get())
+            try:
+                alpha = float(self.rtd_alpha_var.get())
+                beta  = float(self.rtd_beta_var.get())
+                delta = float(self.rtd_delta_var.get())
+                r0    = float(self.rtd_r0_var.get())
+            except ValueError:
+                alpha, beta, delta, r0 = 0.003850, 0.10863, 1.4999, 100.0
+            rtd_cfg = RTDConfig(
+                rtd_type=rtd_type,
+                scale=RTDScale(self.rtd_scale_var.get()),
+                unit=RTDUnit(self.rtd_unit_var.get()),
+                alpha=alpha,
+                beta=beta,
+                delta=delta,
+                r_zero=r0,
+            )
+
         return TerminalConfig(
             enabled=self.enabled_var.get(),
-            mode=MeasureMode[self.mode_var.get()],
+            mode=mode,
             range_value=self.get_range_value(),
             nplc=float(self.nplc_var.get()),
             guard=Guard.FLOAT if guard_name == "FLOAT" else Guard.CABLE,
             resistance_power=ResistancePower.HIGH if power_name == "HIGH" else ResistancePower.LOW,
             ocomp=OcompState.ON if self.ocomp_var.get() == "ON" else OcompState.OFF,
+            rtd=rtd_cfg,
         )
 
     def _do_apply(self) -> None:
@@ -205,10 +356,16 @@ class TerminalPanel:
 
     def set_controls_enabled(self, enabled: bool) -> None:
         state = "readonly" if enabled else tk.DISABLED
+        entry_state = tk.NORMAL if enabled else tk.DISABLED
         for w in (self.mode_combo, self.range_combo, self.nplc_combo,
-                  self.guard_combo, self.power_combo, self.ocomp_combo):
+                  self.guard_combo, self.power_combo, self.ocomp_combo,
+                  self._rtd_type_combo, self._rtd_scale_combo, self._rtd_unit_combo):
             w.configure(state=state)
+        for w in (self._rtd_alpha_entry, self._rtd_beta_entry,
+                  self._rtd_delta_entry, self._rtd_r0_entry):
+            w.configure(state=entry_state)
         self.check.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+        self._rtd_check.configure(state=tk.NORMAL if enabled else tk.DISABLED)
         self.apply_btn.configure(state=tk.NORMAL if enabled else tk.DISABLED)
 
 
@@ -436,10 +593,14 @@ class MainWindow(tk.Tk):
                 guard=cfg.guard,
                 resistance_power=cfg.resistance_power,
                 ocomp=cfg.ocomp,
+                rtd=cfg.rtd,
             )
             range_text = panel.range_var.get() or "auto"
+            rtd_text = ""
+            if cfg.rtd:
+                rtd_text = f"  RTD={cfg.rtd.rtd_type.value}/{cfg.rtd.unit.symbol()}"
             self._status_var.set(
-                f"Applied {terminal.value}: {cfg.mode.name}  range={range_text}  NPLC={cfg.nplc}"
+                f"Applied {terminal.value}: {cfg.mode.name}  range={range_text}  NPLC={cfg.nplc}{rtd_text}"
             )
         except Exception as exc:
             messagebox.showerror("Configuration Error", str(exc))
@@ -614,15 +775,19 @@ class MainWindow(tk.Tk):
         terminal = tr.terminal
         result = tr.result
 
-        # Get the config for this terminal to know its mode/unit
+        # Get the config for this terminal to know its mode
         if terminal == Terminal.FRONT:
             panel = self._front_panel
         else:
             panel = self._rear_panel
 
         mode = MeasureMode[panel.mode_var.get()]
-        unit = UNITS.get(mode, "?")
+        # Use the unit from the ReadResult — it accounts for RTD mode
+        unit = result.unit or UNITS.get(mode, "?")
         label = panel.reading_label
+
+        # RTD readings are temperature — use a different display format
+        is_rtd = (mode == MeasureMode.RES4W and panel.rtd_enabled_var.get())
 
         if result.success:
             self._sample_count += 1
@@ -633,8 +798,13 @@ class MainWindow(tk.Tk):
                 log_fmt = "OVERLOAD"
                 label.configure(text=display, fg="#c62828")
             else:
-                display = f"{result.value:+.9f} {unit}"
-                log_fmt = f"{result.value:+.10E} {unit}"
+                if is_rtd:
+                    # Temperature: fewer decimals, no sign prefix for positive
+                    display = f"{result.value:.4f} {unit}"
+                    log_fmt = f"{result.value:.6f} {unit}"
+                else:
+                    display = f"{result.value:+.9f} {unit}"
+                    log_fmt = f"{result.value:+.10E} {unit}"
                 label.configure(text=display, fg="#2e7d32")
 
             ts = datetime.now().strftime("%H:%M:%S")
@@ -643,10 +813,11 @@ class MainWindow(tk.Tk):
 
             if self._csv.is_open:
                 range_text = panel.range_var.get() or "auto"
+                csv_mode = f"{mode.name}+RTD" if is_rtd else mode.name
                 try:
                     self._csv.write_row(
                         value=result.value,
-                        mode=mode.name,
+                        mode=csv_mode,
                         range_label=range_text,
                         nplc=float(panel.nplc_var.get()),
                         unit=unit,

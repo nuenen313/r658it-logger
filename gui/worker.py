@@ -14,7 +14,7 @@ from typing import Callable, Optional
 
 from instrument.r6581t import (
     R6581T, ReadResult, Terminal, MeasureMode,
-    Guard, ResistancePower, OcompState,
+    Guard, ResistancePower, OcompState, RTDConfig,
 )
 
 
@@ -28,6 +28,7 @@ class TerminalConfig:
     guard: Guard = Guard.FLOAT
     resistance_power: ResistancePower = ResistancePower.HIGH
     ocomp: OcompState = OcompState.OFF
+    rtd: Optional[RTDConfig] = None  # None = disabled; only valid with RES4W mode
 
 
 @dataclass
@@ -62,12 +63,17 @@ class MeasurementWorker:
         self.on_reading = on_reading
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        # Track what's currently configured to avoid redundant reconfiguration
-        self._last_configured: Optional[tuple[Terminal, MeasureMode, float, float]] = None
+        # Track what's currently configured to avoid redundant reconfiguration.
+        # Terminal is tracked separately because set_terminal() causes the meter
+        # to re-settle its sense lines, which on resistance modes adds a delay
+        # comparable to an entire measurement cycle (doubling the interval).
+        self._last_terminal: Optional[Terminal] = None
+        self._last_config_key: Optional[tuple] = None
 
     def start(self) -> None:
         self._stop_event.clear()
-        self._last_configured = None
+        self._last_terminal = None
+        self._last_config_key = None
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -102,15 +108,29 @@ class MeasurementWorker:
                     elapsed += 0.1
 
     def _read_terminal(self, terminal: Terminal, cfg: TerminalConfig) -> None:
-        """Switch terminal, reconfigure if needed, read, and emit result."""
-        try:
-            self.meter.set_terminal(terminal)
-        except Exception:
-            pass
+        """Switch terminal (if needed), reconfigure (if needed), read, and emit."""
+        # Only send :INP:TERM when actually switching terminals.
+        # On the R6581T, :INP:TERM causes the meter to re-settle its sense
+        # lines even if the terminal hasn't changed — this adds significant
+        # delay in resistance modes (high NPLC), effectively doubling the
+        # measurement interval.
+        if self._last_terminal != terminal:
+            try:
+                self.meter.set_terminal(terminal)
+                self._last_terminal = terminal
+                # Terminal changed — force reconfigure since the new terminal
+                # may not have the same measurement setup loaded.
+                self._last_config_key = None
+            except Exception:
+                pass
 
-        # Reconfigure only if settings differ from what's currently loaded
-        config_key = (terminal, cfg.mode, cfg.range_value, cfg.nplc)
-        if self._last_configured != config_key:
+        # Reconfigure only if settings differ from what's currently loaded.
+        # The key includes all parameters that affect SCPI state.  Dataclass
+        # equality on RTDConfig compares all fields, so any coefficient
+        # change triggers reconfiguration.
+        config_key = (cfg.mode, cfg.range_value, cfg.nplc, cfg.guard,
+                      cfg.resistance_power, cfg.ocomp, cfg.rtd)
+        if self._last_config_key != config_key:
             try:
                 self.meter.configure(
                     mode=cfg.mode,
@@ -119,8 +139,9 @@ class MeasurementWorker:
                     guard=cfg.guard,
                     resistance_power=cfg.resistance_power,
                     ocomp=cfg.ocomp,
+                    rtd=cfg.rtd,
                 )
-                self._last_configured = config_key
+                self._last_config_key = config_key
             except Exception:
                 pass
 
