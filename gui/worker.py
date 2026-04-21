@@ -1,49 +1,78 @@
 """
 Background worker thread for continuous measurement acquisition.
 
-Uses stdlib threading so tkinter's main loop can stay responsive
-while GPIB I/O blocks in the background.
+Supports single-terminal or dual-terminal (front+rear) alternating reads,
+each with independent measurement configuration.
 """
 
 from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass
 from typing import Callable, Optional
 
-from instrument.r6581t import R6581T, ReadResult
+from instrument.r6581t import (
+    R6581T, ReadResult, Terminal, MeasureMode,
+    Guard, ResistancePower, OcompState,
+)
+
+
+@dataclass
+class TerminalConfig:
+    """Measurement configuration for one terminal."""
+    enabled: bool = False
+    mode: MeasureMode = MeasureMode.DCV
+    range_value: float = 10.0
+    nplc: float = 100.0
+    guard: Guard = Guard.FLOAT
+    resistance_power: ResistancePower = ResistancePower.HIGH
+    ocomp: OcompState = OcompState.OFF
+
+
+@dataclass
+class TerminalReadResult:
+    """A read result tagged with which terminal it came from."""
+    terminal: Terminal
+    result: ReadResult
 
 
 class MeasurementWorker:
     """
-    Periodically triggers a reading on the R6581T in a daemon thread
-    and delivers results via a callback.
+    Periodically triggers readings on the R6581T in a daemon thread.
 
-    The callback is called from the worker thread — the GUI must use
-    ``root.after()`` or a queue to marshal results onto the main thread.
+    For each enabled terminal:
+      switch terminal → configure mode → read → emit
+
+    Then waits the remainder of the interval before repeating.
     """
 
     def __init__(
         self,
         meter: R6581T,
         interval_s: float = 5.0,
-        on_reading: Optional[Callable[[ReadResult], None]] = None,
+        front_config: Optional[TerminalConfig] = None,
+        rear_config: Optional[TerminalConfig] = None,
+        on_reading: Optional[Callable[[TerminalReadResult], None]] = None,
     ):
         self.meter = meter
         self.interval_s = interval_s
+        self.front_config = front_config or TerminalConfig(enabled=True)
+        self.rear_config = rear_config or TerminalConfig(enabled=False)
         self.on_reading = on_reading
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Track what's currently configured to avoid redundant reconfiguration
+        self._last_configured: Optional[tuple[Terminal, MeasureMode, float, float]] = None
 
     def start(self) -> None:
         self._stop_event.clear()
+        self._last_configured = None
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
-        # Don't join — the thread is a daemon and will exit on its own.
-        # Joining would block the GUI while waiting for a GPIB read to finish.
         self._thread = None
 
     @property
@@ -53,19 +82,52 @@ class MeasurementWorker:
     def _run(self) -> None:
         while not self._stop_event.is_set():
             t_start = time.monotonic()
-            result = self.meter.read()
+
+            if self.front_config.enabled:
+                self._read_terminal(Terminal.FRONT, self.front_config)
+                if self._stop_event.is_set():
+                    break
+
+            if self.rear_config.enabled:
+                self._read_terminal(Terminal.REAR, self.rear_config)
+                if self._stop_event.is_set():
+                    break
+
             read_duration = time.monotonic() - t_start
-
-            # Check again after read — could have been stopped while waiting
-            if self._stop_event.is_set():
-                break
-            if self.on_reading is not None:
-                self.on_reading(result)
-
-            # Sleep for the remainder of the interval, accounting for read time
             remaining = self.interval_s - read_duration
             if remaining > 0:
                 elapsed = 0.0
                 while elapsed < remaining and not self._stop_event.is_set():
                     time.sleep(0.1)
                     elapsed += 0.1
+
+    def _read_terminal(self, terminal: Terminal, cfg: TerminalConfig) -> None:
+        """Switch terminal, reconfigure if needed, read, and emit result."""
+        try:
+            self.meter.set_terminal(terminal)
+        except Exception:
+            pass
+
+        # Reconfigure only if settings differ from what's currently loaded
+        config_key = (terminal, cfg.mode, cfg.range_value, cfg.nplc)
+        if self._last_configured != config_key:
+            try:
+                self.meter.configure(
+                    mode=cfg.mode,
+                    range_value=cfg.range_value,
+                    nplc=cfg.nplc,
+                    guard=cfg.guard,
+                    resistance_power=cfg.resistance_power,
+                    ocomp=cfg.ocomp,
+                )
+                self._last_configured = config_key
+            except Exception:
+                pass
+
+        result = self.meter.read()
+
+        if self._stop_event.is_set():
+            return
+
+        if self.on_reading is not None:
+            self.on_reading(TerminalReadResult(terminal=terminal, result=result))

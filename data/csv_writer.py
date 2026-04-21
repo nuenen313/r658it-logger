@@ -19,7 +19,7 @@ class CSVWriter:
     data is never lost, even on a crash or Ctrl-C.
     """
 
-    HEADER = ["timestamp", "elapsed_s", "mode", "range", "nplc", "value", "unit", "overload"]
+    HEADER = ["timestamp", "elapsed_s", "terminal", "mode", "range", "nplc", "value", "unit", "overload"]
 
     def __init__(self) -> None:
         self._file = None
@@ -51,6 +51,7 @@ class CSVWriter:
         range_label: str,
         nplc: float,
         unit: str,
+        terminal: str = "FRONT",
         overload: bool = False,
     ) -> None:
         """Append one measurement row and flush to disk."""
@@ -63,6 +64,7 @@ class CSVWriter:
         self._writer.writerow([
             now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
             f"{elapsed:.3f}",
+            terminal,
             mode,
             range_label,
             nplc,
