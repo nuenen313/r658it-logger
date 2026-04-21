@@ -13,7 +13,7 @@ from typing import Optional
 
 from instrument.r6581t import (
     R6581T, MeasureMode, RANGES, NPLC_VALUES, UNITS,
-    Guard, ResistancePower, OcompState, RTDType, RTDConfig,
+    Guard, ResistancePower, OcompState,
     ReadResult,
 )
 from data.csv_writer import CSVWriter
@@ -45,8 +45,6 @@ class MainWindow(tk.Tk):
         self._guard_var = tk.StringVar(value="Float")
         self._power_var = tk.StringVar(value="High")
         self._ocomp_var = tk.StringVar(value="OFF")
-        self._rtd_type_var = tk.StringVar(value="PT100")
-        self._rtd_rzero_var = tk.StringVar(value="100.0")
         self._csv_path_var = tk.StringVar()
         self._interval_var = tk.StringVar(value="5.0")
         self._status_var = tk.StringVar(value="Ready — connect to an instrument to begin.")
@@ -251,28 +249,6 @@ class MainWindow(tk.Tk):
         self._ocomp_combo.grid(row=row, column=1, sticky=tk.EW, padx=4, pady=2)
         row += 1
 
-        # --- Temperature options ---
-        self._temp_sep = ttk.Label(group, text="Temperature (4W RTD) Options", style="Section.TLabel")
-        self._temp_sep.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(8, 2))
-        row += 1
-
-        self._rtd_type_label = ttk.Label(group, text="RTD Type:")
-        self._rtd_type_label.grid(row=row, column=0, sticky=tk.W, pady=2)
-        self._rtd_type_combo = ttk.Combobox(
-            group, textvariable=self._rtd_type_var, width=20,
-            values=[t.value for t in RTDType], state="readonly",
-        )
-        self._rtd_type_combo.grid(row=row, column=1, sticky=tk.EW, padx=4, pady=2)
-        self._rtd_type_combo.bind("<<ComboboxSelected>>", lambda e: self._on_rtd_type_changed())
-        row += 1
-
-        # R0 entry (shown only for USER type)
-        self._rtd_rzero_label = ttk.Label(group, text="R0 (Ohm):")
-        self._rtd_rzero_label.grid(row=row, column=0, sticky=tk.W, pady=2)
-        self._rtd_rzero_entry = ttk.Entry(group, textvariable=self._rtd_rzero_var, width=22)
-        self._rtd_rzero_entry.grid(row=row, column=1, sticky=tk.EW, padx=4, pady=2)
-        row += 1
-
         # Apply button
         self._apply_btn = ttk.Button(
             group, text="Apply Configuration", command=self._apply_configuration,
@@ -344,41 +320,11 @@ class MainWindow(tk.Tk):
             self._range_label.grid_remove()
             self._range_combo.grid_remove()
 
-        # Resistance options (also shown for TEMP since it uses 4W resistance)
-        is_res = mode in (MeasureMode.RES2W, MeasureMode.RES4W, MeasureMode.TEMP)
+        # Resistance options (source power, ocomp, guard — for 4W only)
+        is_res4w = mode == MeasureMode.RES4W
         for w in (self._res_sep, self._power_label, self._power_combo,
                   self._ocomp_label, self._ocomp_combo):
-            w.grid() if is_res else w.grid_remove()
-
-        # Temperature options
-        is_temp = mode == MeasureMode.TEMP
-        for w in (self._temp_sep, self._rtd_type_label, self._rtd_type_combo):
-            w.grid() if is_temp else w.grid_remove()
-
-        self._update_rtd_user_fields(is_temp)
-
-    def _on_rtd_type_changed(self) -> None:
-        mode_name = self._mode_var.get()
-        mode = MeasureMode[mode_name]
-        is_temp = mode == MeasureMode.TEMP
-        self._update_rtd_user_fields(is_temp)
-
-        # Auto-set R0 based on type
-        rtd_type = self._rtd_type_var.get()
-        if rtd_type == "PT100":
-            self._rtd_rzero_var.set("100.0")
-        elif rtd_type == "PT1000":
-            self._rtd_rzero_var.set("1000.0")
-
-    def _update_rtd_user_fields(self, is_temp: bool) -> None:
-        """Show R0 field only when mode=TEMP and type=USER."""
-        show = is_temp and self._rtd_type_var.get() == "USER"
-        if show:
-            self._rtd_rzero_label.grid()
-            self._rtd_rzero_entry.grid()
-        else:
-            self._rtd_rzero_label.grid_remove()
-            self._rtd_rzero_entry.grid_remove()
+            w.grid() if is_res4w else w.grid_remove()
 
     # ==================================================================
     # Connection
@@ -457,20 +403,10 @@ class MainWindow(tk.Tk):
 
         ocomp = OcompState.ON if self._ocomp_var.get() == "ON" else OcompState.OFF
 
-        rtd_type = RTDType(self._rtd_type_var.get())
-        if rtd_type == RTDType.PT100:
-            r0 = 100.0
-        elif rtd_type == RTDType.PT1000:
-            r0 = 1000.0
-        else:
-            r0 = float(self._rtd_rzero_var.get())
-
-        rtd = RTDConfig(type=rtd_type, r_zero=r0)
-
         try:
             self._meter.configure(
                 mode=mode, range_value=range_val, nplc=nplc,
-                guard=guard, resistance_power=power, ocomp=ocomp, rtd=rtd,
+                guard=guard, resistance_power=power, ocomp=ocomp,
             )
             range_text = self._range_var.get() or "auto"
             self._status_var.set(
@@ -557,11 +493,9 @@ class MainWindow(tk.Tk):
         entry_state = tk.NORMAL if enabled else tk.DISABLED
 
         for w in (self._mode_combo, self._range_combo, self._nplc_combo,
-                  self._guard_combo, self._power_combo, self._ocomp_combo,
-                  self._rtd_type_combo):
+                  self._guard_combo, self._power_combo, self._ocomp_combo):
             w.configure(state=state)
 
-        self._rtd_rzero_entry.configure(state=entry_state)
         self._apply_btn.configure(state=entry_state)
         self._csv_entry.configure(state=entry_state)
         self._browse_btn.configure(state=entry_state)
@@ -599,10 +533,6 @@ class MainWindow(tk.Tk):
                 display = "OVERLOAD"
                 log_fmt = "OVERLOAD"
                 self._reading_label.configure(text=display, fg="#c62828")
-            elif mode == MeasureMode.TEMP:
-                display = f"{result.value:+.4f} {unit}"
-                log_fmt = f"{result.value:+.6E} {unit}"
-                self._reading_label.configure(text=display, fg="#2e7d32")
             else:
                 display = f"{result.value:+.9f} {unit}"
                 log_fmt = f"{result.value:+.10E} {unit}"
